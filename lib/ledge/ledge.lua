@@ -8,6 +8,8 @@ local unpack = unpack
 local tostring = tostring
 local tonumber = tonumber
 local type = type
+local rawget = rawget
+local rawset = rawset
 local table = table
 local ngx = ngx
 
@@ -29,7 +31,7 @@ ORIGIN_MODE_NORMAL = 4 -- Assume the origin is happy, use at will.
 
 
 function new(self)
-    local config = {
+    local config_defaults = {
         origin_location = "/__ledge_origin",
         redis_host      = "127.0.0.1",
         redis_port      = 6379,
@@ -46,6 +48,35 @@ function new(self)
         enable_collapsed_forwarding = false,
         collapsed_forwarding_window = 60 * 1000,   -- Window for collapsed requests (ms)
     }
+
+    local config = {} -- The actual module level config
+    local config_mt = {
+        __index = function(t, k)
+            if ngx.get_phase() == "init" then
+                ngx.log(ngx.DEBUG, "get " .. k .." from defaults")
+                return rawget(config_defaults, k)
+            else
+                ngx.log(ngx.DEBUG, "get " ..k.." from ctx")
+                return rawget(self:ctx().config, k) or rawget(config_defaults, k)
+            end
+        end,
+
+        __newindex = function(t, k, v)
+            if not rawget(config_defaults, k) then
+                ngx.log(ngx.ERR, "Unknown configuration option " .. k)
+            else
+                if ngx.get_phase() == "init" then
+                    ngx.log(ngx.DEBUG, "set " ..k.." to defaults")
+                    rawset(config, k, v)
+                else
+                    ngx.log(ngx.DEBUG, "set " ..k.." to ctx")
+                    rawset(self:ctx().config, k, v)
+                end
+            end
+        end,
+    }
+
+    setmetatable(config, config_mt)
 
     return setmetatable({ config = config }, mt)
 end
@@ -286,22 +317,28 @@ end
 
 -- Set a config parameter
 function config_set(self, param, value)
+    self.config[param] = value
+    --[[
     if ngx.get_phase() == "init" then
         self.config[param] = value
     else
         self:ctx().config[param] = value
     end
+    --]]
 end
 
 
 -- Gets a config parameter.
 function config_get(self, param)
+    return self.config[param]
+    --[[
     local p = self:ctx().config[param]
     if p == nil then
         return self.config[param]
     else
         return p
     end
+    ]]--
 end
 
 
