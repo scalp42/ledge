@@ -31,14 +31,16 @@ ORIGIN_MODE_NORMAL = 4 -- Assume the origin is happy, use at will.
 function new(self)
     local config = {
         origin_location = "/__ledge_origin",
-        redis_host      = "127.0.0.1",
-        redis_port      = 6379,
-        redis_socket    = nil,
-        redis_password  = nil,
-        redis_database  = 0,
-        redis_timeout   = 100,          -- Connect and read timeout (ms)
-        redis_keepalive_timeout = nil,  -- Defaults to 60s or lua_socket_keepalive_timeout
-        redis_keepalive_poolsize = nil, -- Defaults to 30 or lua_socket_pool_size
+        redis = {
+            use_sentinel = false,
+            hosts = {
+                { host = "127.0.0.1", port = 6379, socket = nil, password  = nil, },
+            },
+            database  = 0,
+            timeout   = 100,          -- Connect and read timeout (ms)
+            keepalive_timeout = nil,  -- Defaults to 60s or lua_socket_keepalive_timeout
+            keepalive_poolsize = nil, -- Defaults to 30 or lua_socket_pool_size
+        },
         keep_cache_for  = 86400 * 30,   -- Max time to Keep cache items past expiry + stale (sec)
         origin_mode     = ORIGIN_MODE_NORMAL,
         max_stale       = nil,          -- Warning: Violates HTTP spec
@@ -91,20 +93,23 @@ end
 function redis_connect(self)
     -- Connect to Redis. The connection is kept alive later.
     self:ctx().redis = redis:new()
-    if self:config_get("redis_timeout") then
-        self:ctx().redis:set_timeout(self:config_get("redis_timeout"))
+    local redis_conf = self:config_get("redis")
+    if redis_conf.timeout then
+        self:ctx().redis:set_timeout(redis_conf.timeout)
     end
 
-    local ok, err = self:ctx().redis:connect(
-        self:config_get("redis_socket") or self:config_get("redis_host"),
-        self:config_get("redis_port")
-    )
+    local ok, err
 
-    if ok then
-        -- Attempt authentication.
-        local password = self:config_get("redis_password")
-        if password then
-            ok, err = self:ctx().redis:auth(password)
+    for _, conn in ipairs(redis_conf.hosts) do
+        ok, err = self:ctx().redis:connect(conn.socket or conn.host, conn.port)
+        if ok then 
+
+            -- Attempt authentication.
+            if conn.password then
+                ok, err = self:ctx().redis:auth(conn.password)
+            end
+
+            break -- We're done
         end
     end
 
@@ -117,8 +122,8 @@ function redis_connect(self)
     end
 
     -- redis:select always returns OK
-    if self:config_get("redis_database") > 0 then
-        self:ctx().redis:select(self:config_get("redis_database"))
+    if redis_conf.database > 0 then
+        self:ctx().redis:select(redis_conf.database)
     end
 end
 
