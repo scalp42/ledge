@@ -7,11 +7,11 @@ $ENV{TEST_LEDGE_REDIS_DATABASE} ||= 1;
 my $pwd = cwd();
 
 our $HttpConfig = qq{
-	lua_package_path "$pwd/../lua-resty-rack/lib/?.lua;$pwd/lib/?.lua;;";
+	lua_package_path "$pwd/lib/?.lua;;";
     init_by_lua "
         ledge_mod = require 'ledge.ledge'
         ledge = ledge_mod:new()
-        ledge:config_set('redis_database', $ENV{TEST_LEDGE_REDIS_DATABASE})
+        ledge.config.redis.database = $ENV{TEST_LEDGE_REDIS_DATABASE}
     ";
 };
 
@@ -23,7 +23,7 @@ __DATA__
 --- config
 	location /origin_mode {
         content_by_lua '
-            ledge:config_set("origin_mode", ledge.ORIGIN_MODE_NORMAL)
+            ledge.config.origin_mode = ledge.ORIGIN_MODE_NORMAL
             ledge:run()
         ';
     }
@@ -42,7 +42,7 @@ OK
 --- config
 	location /origin_mode {
         content_by_lua '
-            ledge:config_set("origin_mode", ledge.ORIGIN_MODE_AVOID)
+            ledge.config.origin_mode = ledge.ORIGIN_MODE_AVOID
             ledge:run()
         ';
     }
@@ -62,7 +62,7 @@ OK
 --- config
 	location /origin_mode {
         content_by_lua '
-            ledge:config_set("origin_mode", ledge.ORIGIN_MODE_BYPASS)
+            ledge.config.origin_mode = ledge.ORIGIN_MODE_BYPASS
             ledge:run()
         ';
     }
@@ -81,7 +81,7 @@ OK
 --- config
 	location /origin_mode_bypass {
         content_by_lua '
-            ledge:config_set("origin_mode", ledge.ORIGIN_MODE_BYPASS)
+            ledge.config.origin_mode = ledge.ORIGIN_MODE_BYPASS
             ledge:run()
         ';
     }

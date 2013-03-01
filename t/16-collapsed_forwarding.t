@@ -12,8 +12,8 @@ our $HttpConfig = qq{
     init_by_lua "
         ledge_mod = require 'ledge.ledge'
         ledge = ledge_mod:new()
-        ledge:config_set('redis_database', $ENV{TEST_LEDGE_REDIS_DATABASE})
-        ledge:config_set('enable_collapsed_forwarding', true)
+        ledge.config.redis.database = $ENV{TEST_LEDGE_REDIS_DATABASE}
+        ledge.config.enable_collapsed_forwarding = true
     ";
 };
 
@@ -116,7 +116,7 @@ location /concurrent_collapsed {
 }
 location /collapsed {
     content_by_lua '
-        ledge:config_set("enable_collapsed_forwarding", false)
+        ledge.config.enable_collapsed_forwarding = false
         ledge:run()'
     ;
 }
