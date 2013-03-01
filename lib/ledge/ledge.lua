@@ -61,7 +61,10 @@ function new(self)
         collapsed_forwarding_window = 60 * 1000,   -- Window for collapsed requests (ms)
     }
 
-
+    -- The config metatables (which may appear a little cryptic) allow us to:
+    --  1) Ensure an error is logged if an unknown option is set.
+    --  2) Dynamically get/set from the module globals or the instance context, allowing the 
+    --  same config API to be used during init_by_lua and e.g. content_by_lua.
     local config = setmetatable(
         {
             redis = setmetatable(
