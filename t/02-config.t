@@ -51,3 +51,18 @@ GET /config_2
 --- response_body
 0
 4
+
+
+=== TEST 3: Test that bad config options log an error
+--- http_config eval: $::HttpConfig
+--- config
+location /config_3 {
+    content_by_lua '
+        local ledge2 = ledge_mod:new()
+        ledge.config.bad_option = 5
+    ';
+}
+--- request
+GET /config_3
+--- error_log
+Unknown configuration option bad_option
