@@ -8,11 +8,11 @@ my $pwd = cwd();
 $ENV{TEST_LEDGE_REDIS_DATABASE} ||= 1;
 
 our $HttpConfig = qq{
-	lua_package_path "$pwd/../lua-resty-rack/lib/?.lua;$pwd/lib/?.lua;;";
+	lua_package_path "$pwd/lib/?.lua;;";
 	init_by_lua "
 		ledge_mod = require 'ledge.ledge'
         ledge = ledge_mod:new()
-		ledge:config_set('redis_database', $ENV{TEST_LEDGE_REDIS_DATABASE})
+		ledge.config.redis.database = $ENV{TEST_LEDGE_REDIS_DATABASE}
 	";
     if_modified_since off;
 };

@@ -12,9 +12,8 @@ our $HttpConfig = qq{
 	init_by_lua "
 		ledge_mod = require 'ledge.ledge'
         ledge = ledge_mod:new()
-		ledge:config_set('redis_database', $ENV{TEST_LEDGE_REDIS_DATABASE})
-        ledge:config_set('background_revalidate', true)
-        ledge:config_set('max_stale', 99999)
+		ledge.config.redis.database = $ENV{TEST_LEDGE_REDIS_DATABASE}
+        ledge.config.max_stale = 99999
 	";
 };
 

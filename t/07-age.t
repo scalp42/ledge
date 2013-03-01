@@ -7,12 +7,12 @@ $ENV{TEST_LEDGE_REDIS_DATABASE} ||= 1;
 my $pwd = cwd();
 
 our $HttpConfig = qq{
-	lua_package_path "$pwd/../lua-resty-rack/lib/?.lua;$pwd/lib/?.lua;;";
+	lua_package_path "$pwd/lib/?.lua;;";
     init_by_lua "
         cjson = require 'cjson'
         ledge_mod = require 'ledge.ledge'
         ledge = ledge_mod:new()
-        ledge:config_set('redis_database', $ENV{TEST_LEDGE_REDIS_DATABASE})
+        ledge.config.redis.database = $ENV{TEST_LEDGE_REDIS_DATABASE}
     ";
 };
 

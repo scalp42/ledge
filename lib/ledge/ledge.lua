@@ -8,8 +8,20 @@ local unpack = unpack
 local tostring = tostring
 local tonumber = tonumber
 local type = type
+local rawget = rawget
+local rawset = rawset
 local table = table
 local ngx = ngx
+
+-- Special rawget, treating ngx.null as nil
+local config_rawget = function(t, k)
+    local v = rawget(t, k)
+    if v == ngx.null then
+        return nil
+    else
+        return v
+    end
+end
 
 module(...)
 
@@ -29,25 +41,82 @@ ORIGIN_MODE_NORMAL = 4 -- Assume the origin is happy, use at will.
 
 
 function new(self)
-    local config = {
+    local config_defaults = {
         origin_location = "/__ledge_origin",
         redis = {
-            use_sentinel = false,
+            -- Try these in order. If using sentinel, these should be sentinels not redis hosts.
             hosts = {
-                { host = "127.0.0.1", port = 6379, socket = nil, password  = nil, },
+                { host = "127.0.0.1", port = 6379, socket = nil, password = nil, },
             },
+            enable_sentinel = false,
+            sentinel_master_name = "ledge",
             database  = 0,
             timeout   = 100,          -- Connect and read timeout (ms)
-            keepalive_timeout = nil,  -- Defaults to 60s or lua_socket_keepalive_timeout
-            keepalive_poolsize = nil, -- Defaults to 30 or lua_socket_pool_size
+            keepalive_timeout = ngx.null,  -- Defaults to 60s or lua_socket_keepalive_timeout
+            keepalive_poolsize = ngx.null, -- Defaults to 30 or lua_socket_pool_size
         },
         keep_cache_for  = 86400 * 30,   -- Max time to Keep cache items past expiry + stale (sec)
         origin_mode     = ORIGIN_MODE_NORMAL,
-        max_stale       = nil,          -- Warning: Violates HTTP spec
-        enable_esi      = false,
-        enable_collapsed_forwarding = false,
+        max_stale       = ngx.null,          -- Warning: Violates HTTP spec
+        enable_esi      = ngx.null,
+        enable_collapsed_forwarding = ngx.null,
         collapsed_forwarding_window = 60 * 1000,   -- Window for collapsed requests (ms)
     }
+
+    -- The config metatables (which may appear a little cryptic) allow us to:
+    --  1) Ensure an error is logged if an unknown option is set.
+    --  2) Dynamically get/set from the module globals or the instance context, allowing the 
+    --  same config API to be used during init_by_lua and e.g. content_by_lua.
+    local config = setmetatable(
+        {
+            redis = setmetatable(
+                {},
+                {
+                    __index = function(t, k)
+                        if ngx.get_phase() == "init" then
+                            return config_rawget(config_defaults.redis, k)
+                        else
+                            return config_rawget(self:ctx().config.redis, k) or 
+                            config_rawget(config_defaults.redis, k)
+                        end
+                    end,
+
+                    __newindex = function(t, k, v)
+                        if not rawget(config_defaults.redis, k) then
+                            ngx.log(ngx.ERR, "Unknown configuration option " .. k)
+                        else
+                            if ngx.get_phase() == "init" then
+                                rawset(t, k, v)
+                            else
+                                rawset(self:ctx().config.redis, k, v)
+                            end
+                        end
+                    end,
+                }
+            )
+        },
+        {
+            __index = function(t, k)
+                if ngx.get_phase() == "init" then
+                    return config_rawget(config_defaults, k)
+                else
+                    return config_rawget(self:ctx().config, k) or config_rawget(config_defaults, k)
+                end
+            end,
+
+            __newindex = function(t, k, v)
+                if not rawget(config_defaults, k) then
+                    ngx.log(ngx.ERR, "Unknown configuration option " .. k)
+                else
+                    if ngx.get_phase() == "init" then
+                        rawset(t, k, v)
+                    else
+                        rawset(self:ctx().config, k, v)
+                    end
+                end
+            end,
+        }
+    )
 
     return setmetatable({ config = config }, mt)
 end
@@ -60,7 +129,7 @@ function ctx(self)
     if not ctx then
         ctx = {
             events = {},
-            config = {},
+            config = { redis = {} },
             state_history = {},
             event_history = {},
             current_state = "",
@@ -91,22 +160,23 @@ end
 
 
 function redis_connect(self)
-    -- Connect to Redis. The connection is kept alive later.
-    self:ctx().redis = redis:new()
-    local redis_conf = self:config_get("redis")
-    if redis_conf.timeout then
-        self:ctx().redis:set_timeout(redis_conf.timeout)
-    end
+    local config = self.config
+    local redis = redis:new()
+    self:ctx().redis = redis
 
+    if config.redis.timeout and config.redis.timeout ~= ngx.null then
+        redis:set_timeout(config.redis.timeout)
+    end
+    
     local ok, err
 
-    for _, conn in ipairs(redis_conf.hosts) do
-        ok, err = self:ctx().redis:connect(conn.socket or conn.host, conn.port)
+    for _, conn in ipairs(config.redis.hosts) do
+        ok, err = redis:connect(conn.socket or conn.host, conn.port)
         if ok then 
 
             -- Attempt authentication.
             if conn.password then
-                ok, err = self:ctx().redis:auth(conn.password)
+                redis:auth(conn.password)
             end
 
             break -- We're done
@@ -118,27 +188,29 @@ function redis_connect(self)
     -- TODO: Make this configurable for situations where a 500 is better.
     if not ok then
         ngx.log(ngx.WARN, err .. ", internally redirecting to the origin")
-        return ngx.exec(self:config_get("origin_location")..relative_uri())
+        return ngx.exec(config.origin_location..relative_uri())
     end
 
     -- redis:select always returns OK
-    if redis_conf.database > 0 then
-        self:ctx().redis:select(redis_conf.database)
+    if config.redis.database > 0 then
+        redis:select(config.redis.database)
     end
 end
 
 
 function redis_close(self)
+    local config = self.config
+
     -- Keep the Redis connection based on keepalive settings.
     local ok, err = nil
-    if self:config_get("redis_keepalive_timeout") then
-        if self:config_get("redis_keepalive_pool_size") then
+    if config.redis.keepalive_timeout then
+        if config.redis.keepalive_pool_size then
             ok, err = self:ctx().redis:set_keepalive(
-                self:config_get("redis_keepalive_timeout"),
-                self:config_get("redis_keepalive_pool_size")
+                config.redis.keepalive_timeout,
+                config.redis.keepalive_pool_size
             )
         else
-            ok, err = self:ctx().redis:set_keepalive(self:config_get("redis_keepalive_timeout"))
+            ok, err = self:ctx().redis:set_keepalive(config.redis.keepalive_timeout)
         end
     else
         ok, err = self:ctx().redis:set_keepalive()
@@ -152,7 +224,7 @@ end
 
 function accepts_stale(self, res)
     -- max_stale config overrides everything
-    local max_stale = self:config_get("max_stale")
+    local max_stale = self.config.max_stale
     if max_stale and max_stale > 0 then
         return max_stale
     end
@@ -189,7 +261,7 @@ function request_accepts_cache(self)
     end
 
     -- Ignore the client requirements if we're not in "NORMAL" mode.
-    if self:config_get("origin_mode") < ORIGIN_MODE_NORMAL then
+    if self.config.origin_mode < ORIGIN_MODE_NORMAL then
         return true
     end
 
@@ -270,7 +342,7 @@ function cache_key(self)
     if not self:ctx().cache_key then
         -- Generate the cache key. The default spec is:
         -- ledge:cache_obj:http:example.com:/about:p=3&q=searchterms
-        local key_spec = self:config_get("cache_key_spec") or {
+        local key_spec = self.config.cache_key_spec or {
             ngx.var.scheme,
             ngx.var.host,
             ngx.var.uri,
@@ -286,27 +358,6 @@ end
 
 function fetching_key(self)
     return self:cache_key() .. ":fetching"
-end
-
-
--- Set a config parameter
-function config_set(self, param, value)
-    if ngx.get_phase() == "init" then
-        self.config[param] = value
-    else
-        self:ctx().config[param] = value
-    end
-end
-
-
--- Gets a config parameter.
-function config_get(self, param)
-    local p = self:ctx().config[param]
-    if p == nil then
-        return self.config[param]
-    else
-        return p
-    end
 end
 
 
@@ -709,7 +760,9 @@ states = {
     end,
 
     checking_can_fetch = function(self)
-        if self:config_get("origin_mode") == ORIGIN_MODE_BYPASS then
+        local config = self.config
+
+        if config.origin_mode == ORIGIN_MODE_BYPASS then
             return self:e "http_service_unavailable"
         end
 
@@ -719,7 +772,7 @@ states = {
             return self:e "http_gateway_timeout"
         end
 
-        if self:config_get("enable_collapsed_forwarding") then
+        if config.enable_collapsed_forwarding then
             return self:e "can_fetch_but_try_collapse"
         end
 
@@ -730,7 +783,7 @@ states = {
         local redis = self:ctx().redis
         local lock_key = self:fetching_key()
         
-        local timeout = tonumber(self:config_get("collapsed_forwarding_window"))
+        local timeout = tonumber(self.config.collapsed_forwarding_window)
         if not timeout then
             ngx.log(ngx.ERR, "collapsed_forwarding_window must be a number")
             return self:e "collapsed_forwarding_failed"
@@ -798,14 +851,15 @@ states = {
 
     waiting_on_collapsed_forwarding_channel = function(self)
         local redis = self:ctx().redis
+        local config = self.config
 
         -- Extend the timeout to the size of the window
-        redis:set_timeout(self:config_get("collapsed_forwarding_window"))
+        redis:set_timeout(config.collapsed_forwarding_window)
         local res, err = redis:read_reply() -- block until we hear something or timeout
         if not res then
             return self:e "http_gateway_timeout"
         else
-            redis:set_timeout(self:config_get("redis_timeout"))
+            redis:set_timeout(config.redis_timeout)
             redis:unsubscribe()
 
             -- Returns either "collapsed_response_ready" or "collapsed_forwarding_failed"
@@ -903,7 +957,7 @@ states = {
     end,
 
     preparing_response = function(self)
-        if self:config_get("enable_esi") == true then
+        if self.config.enable_esi == true then
             local res = self:get_response()
             if res:has_esi() then
                 return self:e "esi_detected"
@@ -1074,7 +1128,7 @@ function fetch_from_origin(self)
         return res
     end
 
-    local origin = ngx.location.capture(self:config_get("origin_location")..relative_uri(), {
+    local origin = ngx.location.capture(self.config.origin_location..relative_uri(), {
         method = method
     })
 
@@ -1160,6 +1214,7 @@ function save_to_cache(self, res)
     end
 
     local redis = self:ctx().redis
+    local config = self.config
 
     -- Save atomically
     redis:multi()
@@ -1182,14 +1237,14 @@ function save_to_cache(self, res)
     )
 
     -- If ESI is enabled, store detected ESI features on the slow path.
-    if self:config_get("enable_esi") == true then
+    if config.enable_esi == true then
         if res:has_esi_comment() then redis:hmset(cache_key(self), "esi_comment", 1) end
         if res:has_esi_remove() then redis:hmset(cache_key(self), "esi_remove", 1) end
         if res:has_esi_include() then redis:hmset(cache_key(self), "esi_include", 1) end
         if res:has_esi_vars() then redis:hmset(cache_key(self), "esi_vars", 1) end
     end
 
-    redis:expire(cache_key(self), ttl + tonumber(self:config_get("keep_cache_for")))
+    redis:expire(cache_key(self), ttl + tonumber(config.keep_cache_for))
 
     -- Add this to the uris_by_expiry sorted set, for cache priming and analysis
     redis:zadd('ledge:uris_by_expiry', expires, uri)
